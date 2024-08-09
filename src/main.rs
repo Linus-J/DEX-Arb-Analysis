@@ -11,6 +11,7 @@ async fn main() -> eyre::Result<()> {
 
     let factory_addresses = vec![
         UNISWAP_FACTORY,
+        UNISWAPV3_FACTORY,
         SUSHISWAP_FACTORY,
     ]
     .into_iter()
@@ -28,14 +29,9 @@ async fn main() -> eyre::Result<()> {
 
     let mut crossed_pair = CrossedPairManager::new(&grouped_pairs, &flash_query_contract);
     crossed_pair.write_tokens();
-
-    loop {
-        let mut stream = config.wss.subscribe_blocks().await?;
-        while let Some(block) = stream.next().await {
-            dbg!(block.number.unwrap());
-            crossed_pair.update_reserve().await;
-            crossed_pair.find_arbitrage_opportunities();
-        }
-    }
+    // Fill with pair price data somehow
+    crossed_pair.update_reserve().await;
+    // Find arb
+    crossed_pair.find_arbitrage_opportunities();
     Ok(())
 }

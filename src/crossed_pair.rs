@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::address_book::{UniQuery, MevBot, UNISWAP_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS, MEV_ADDRESS};
+use crate::address_book::{UniQuery, MevBot, UNISWAP_ROUTER, UNISWAPV3_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS, MEV_ADDRESS};
 use crate::utils::*;
 use ethers::{abi::ethereum_types::U512, prelude::*, utils::{format_ether, parse_ether}};
 
@@ -124,27 +124,15 @@ impl<'a> TokenMarket<'a> {
                         let token = *self.token;
                         let pair1 = pair_a.address;
                         let pair2 = pair_b.address;
-                        let eth1 = parse_ether(1).unwrap();  // Send 1 WETH
-
-                        // Since I found the "profit" function wasn't always accurate,
-                        // I included a second calculate function to confirm if the
-                        // path is profitable or not, if it is, we execute it.
-                        tokio::spawn(async move {       
-                                let a = calculate(token, eth1).await;
-                                match a {
-                                    Some(a) => {
-                                        if a.gt(&eth1) {
-                                            println!("\n---------------------------------- ATTEMPTING ARB ----------------------------------------");
-                                            dbg!(token, pair1, pair2);
-                                            println!("------------------------------------------------------------------------------------------");
-                                            execute(token, eth1).await;     // Execute function
-                                        }
-                                    },
-                                    None => {
-                                    }
-                                }
-                            });
-
+                        let eth1 = parse_ether(x).unwrap();  // Send optimal WETH
+                        if let Some(profit_amount) = profit {
+                            println!("\n---------------------------------- SIMULATED ARB ----------------------------------------");
+                            println!("Token: {:?}", token);
+                            println!("Pair 1: {:?}", pair_a.address);
+                            println!("Pair 2: {:?}", pair_b.address);
+                            println!("Potential Profit: {}", format_ether(profit_amount));
+                            println!("------------------------------------------------------------------------------------------");
+                        }
                     }
                 }
             }
@@ -154,62 +142,6 @@ impl<'a> TokenMarket<'a> {
 
 
 use std::{sync::Arc, ops::Add};
-
-pub async fn calculate(
-    token_2: H160,
-    amount: U256
-    ) -> Option<U256> {
-    
-    let config = Config::new().await;
-    let contract_addr = address(MEV_ADDRESS);
-    let mevbot = MevBot::new(
-        contract_addr, 
-        Arc::clone(&config.http)
-    );
-
-    let router_1 = address(UNISWAP_ROUTER);
-    let router_2 = address(SUSHISWAP_ROUTER);
-    let token_1 = address(WETH_ADDRESS);
-
-    let calculate: U256 = mevbot
-    .estimate_dual_dex_trade(router_1, router_2, token_1, token_2, amount)
-    .call()
-    .await
-    .unwrap();
-
-    let gas_price = config.http.get_gas_price().await.unwrap();
-    if calculate.gt(&amount.add(gas_price)) {
-        Some(calculate)
-    } else {
-        None 
-    }
-}
-
-pub async fn execute(
-    token_2: H160,
-    amount: U256
-    ) {
-    let config = Config::new().await;
-    let contract_addr = address(MEV_ADDRESS);
-    let mevbot = MevBot::new(
-        contract_addr, 
-        Arc::clone(&config.http)
-    );
-
-    let router_1 = address(UNISWAP_ROUTER);
-    let router_2 = address(SUSHISWAP_ROUTER);
-    let token_1 = address(WETH_ADDRESS);
-
-    let trade = match mevbot.dual_dex_trade(router_1, router_2, token_1, token_2, amount)
-    .send()
-    .await {
-        Ok(c) => {eprintln!("\nArbitrage completed : {:?}\n", c)},
-        Err(e) => {
-            //eprintln!("\nArbitrage failed : {:?}\n", e);
-        }
-    };
-}
-
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -247,6 +179,8 @@ pub fn profit(pair_a: &Reserve, pair_b: &Reserve) -> Option<(U512, U512, U512)> 
     }
     let alt_amount = U512::from(pair_a.reserve0) * x_opt / (U512::from(pair_a.reserve1) + x_opt);
     let p = (q * x_opt) / (r + s * x_opt) - x_opt;
+
+    // Perhaps implement gas fee subtraction
 
     Some((x_opt, alt_amount, p))
 }
