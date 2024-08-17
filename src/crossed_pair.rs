@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::address_book::{UniQuery, MevBot, UNISWAP_ROUTER, UNISWAPV3_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS, MEV_ADDRESS};
+use crate::address_book::{UniQuery, UNISWAP_ROUTER, UNISWAPV3_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS};
 use crate::utils::*;
 use ethers::{abi::ethereum_types::U512, prelude::*, utils::{format_ether, parse_ether}};
 
@@ -98,9 +98,9 @@ where
             .collect::<Vec<&mut Pair>>()
     }
 
-    pub fn find_arbitrage_opportunities(&mut self) {
+    pub async fn find_arbitrage_opportunities(&mut self, max_bal: U512) {
         for market in &mut self.markets {
-            market.find_arbitrage_opportunity();
+            market.find_arbitrage_opportunity(max_bal).await;
         }
     }
 }
@@ -113,27 +113,27 @@ pub struct TokenMarket<'a> {
 }
 
 impl<'a> TokenMarket<'a> {
-    pub fn find_arbitrage_opportunity(&self) {
+    pub async fn find_arbitrage_opportunity(&self, max_bal: U512) {
+        let config = Config::new().await;
+        let gas_price = U512::from(config.http.get_gas_price().await.unwrap());
         for pair_a in &self.pairs {
             for pair_b in &self.pairs {
                 if let Some((x, _alt_amount, profit)) = profit(
                     pair_a.reserve.as_ref().unwrap(),
                     pair_b.reserve.as_ref().unwrap(),
-                ) {
-                    if profit.gt(&U512::from(parse_ether(0.01).unwrap())) {  
-                        let token = *self.token;
-                        let pair1 = pair_a.address;
-                        let pair2 = pair_b.address;
-                        let eth1 = parse_ether(x).unwrap();  // Send optimal WETH
-                        if let Some(profit_amount) = profit {
-                            println!("\n---------------------------------- SIMULATED ARB ----------------------------------------");
-                            println!("Token: {:?}", token);
-                            println!("Pair 1: {:?}", pair_a.address);
-                            println!("Pair 2: {:?}", pair_b.address);
-                            println!("Potential Profit: {}", format_ether(profit_amount));
-                            println!("------------------------------------------------------------------------------------------");
-                        }
-                    }
+                    max_bal,
+                    gas_price,
+                ) { 
+                    let token = *self.token;
+                    let pair1 = pair_a.address;
+                    let pair2 = pair_b.address;
+                    let eth1 = parse_ether(x).unwrap();
+                    println!("\n---------------------------------- SIMULATED ARB ----------------------------------------");
+                    println!("Token: {:?}", token);
+                    println!("Pair 1: {:?}", pair_a.address);
+                    println!("Pair 2: {:?}", pair_b.address);
+                    println!("Send {} WETH to receive potential profit of {} WETH", x, profit);
+                    println!("------------------------------------------------------------------------------------------");
                 }
             }
         }
@@ -164,7 +164,8 @@ impl Reserve {
     }
 }
 
-pub fn profit(pair_a: &Reserve, pair_b: &Reserve) -> Option<(U512, U512, U512)> {
+//Fix accuracy of profit function
+pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U512, gas_price: U512) -> Option<(U512, U512, U512)> {
     let q = U512::from(pair_a.reserve0 * pair_b.reserve1);
     let r = U512::from(pair_b.reserve0 * pair_a.reserve1);
     let s = U512::from(pair_a.reserve0 + pair_b.reserve0);
@@ -173,15 +174,15 @@ pub fn profit(pair_a: &Reserve, pair_b: &Reserve) -> Option<(U512, U512, U512)> 
     }
 
     let r2 = r.checked_pow(U512::from(2i32)).expect("power overflow");
-    let x_opt = (r2 + ((q * r - r2) / s)).integer_sqrt() - r;
+    let mut x_opt = (r2 + ((q * r - r2) / s)).integer_sqrt() - r;
     if x_opt == U512::from(0u128) {
         return None;
     }
+    if (max_bal<=x_opt){
+        x_opt = max_bal;
+    }
     let alt_amount = U512::from(pair_a.reserve0) * x_opt / (U512::from(pair_a.reserve1) + x_opt);
-    let p = (q * x_opt) / (r + s * x_opt) - x_opt;
-
-    // Perhaps implement gas fee subtraction
-
+    let p = (q * x_opt) / (r + s * x_opt) - x_opt; // - gas_price;
     Some((x_opt, alt_amount, p))
 }
 

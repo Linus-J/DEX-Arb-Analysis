@@ -11,7 +11,7 @@ async fn main() -> eyre::Result<()> {
 
     let factory_addresses = vec![
         UNISWAP_FACTORY,
-        UNISWAPV3_FACTORY,
+        // UNISWAPV3_FACTORY,
         SUSHISWAP_FACTORY,
     ]
     .into_iter()
@@ -32,6 +32,6 @@ async fn main() -> eyre::Result<()> {
     // Fill with pair price data somehow
     crossed_pair.update_reserve().await;
     // Find arb
-    crossed_pair.find_arbitrage_opportunities();
+    crossed_pair.find_arbitrage_opportunities(config.max_bal.clone()).await;
     Ok(())
 }
