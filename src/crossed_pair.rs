@@ -98,9 +98,18 @@ where
             .collect::<Vec<&mut Pair>>()
     }
 
-    pub async fn find_arbitrage_opportunities(&mut self, max_bal: U512) {
-        for market in &mut self.markets {
-            market.find_arbitrage_opportunity(max_bal).await;
+    pub async fn find_arbitrage_opportunities(&mut self, max_bal: u64) {
+        let config = Config::new().await;
+        let gas_price = U256::from(config.http.get_gas_price().await.unwrap());
+        let mb = parse_ether(max_bal).unwrap();
+        if (gas_price >= mb){
+            println!("Gas price = {} exceeds max balance = {}.", format_ether(gas_price.as_u128()), max_bal);
+        }
+        else {
+            let adjusted_bal = mb - gas_price;
+            for market in &mut self.markets {
+                market.find_arbitrage_opportunity(adjusted_bal).await;
+            }
         }
     }
 }
@@ -113,16 +122,13 @@ pub struct TokenMarket<'a> {
 }
 
 impl<'a> TokenMarket<'a> {
-    pub async fn find_arbitrage_opportunity(&self, max_bal: U512) {
-        let config = Config::new().await;
-        let gas_price = U512::from(config.http.get_gas_price().await.unwrap());
+    pub async fn find_arbitrage_opportunity(&self, max_bal: U256) {
         for pair_a in &self.pairs {
             for pair_b in &self.pairs {
                 if let Some((x, _alt_amount, profit)) = profit(
                     pair_a.reserve.as_ref().unwrap(),
                     pair_b.reserve.as_ref().unwrap(),
                     max_bal,
-                    gas_price,
                 ) { 
                     let token = *self.token;
                     let pair1 = pair_a.address;
@@ -132,13 +138,14 @@ impl<'a> TokenMarket<'a> {
                     println!("Token: {:?}", token);
                     println!("Pair 1: {:?}", pair_a.address);
                     println!("Pair 2: {:?}", pair_b.address);
-                    println!("Send {} WETH to receive potential profit of {} WETH", x, profit);
+                    println!("Send {} WETH to receive potential profit of {} WETH", format_ether(x.as_u128()), format_ether(profit.as_u128()));
                     println!("------------------------------------------------------------------------------------------");
                 }
             }
         }
+        }
     }
-}
+
 
 
 use std::{sync::Arc, ops::Add};
@@ -165,24 +172,28 @@ impl Reserve {
 }
 
 //Fix accuracy of profit function
-pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U512, gas_price: U512) -> Option<(U512, U512, U512)> {
+pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U256) -> Option<(U512, U512, U512)> {
     let q = U512::from(pair_a.reserve0 * pair_b.reserve1);
     let r = U512::from(pair_b.reserve0 * pair_a.reserve1);
     let s = U512::from(pair_a.reserve0 + pair_b.reserve0);
     if r > q {
+        println!("No profit due to reserve ratios");
         return None;
     }
 
     let r2 = r.checked_pow(U512::from(2i32)).expect("power overflow");
     let mut x_opt = (r2 + ((q * r - r2) / s)).integer_sqrt() - r;
     if x_opt == U512::from(0u128) {
+        println!("No margin for profit");
         return None;
     }
-    if (max_bal<=x_opt){
-        x_opt = max_bal;
+    // Clean up type conversion
+    if (U512::from(max_bal.as_u128())<=x_opt){
+        x_opt = U512::from(max_bal.as_u128());
     }
     let alt_amount = U512::from(pair_a.reserve0) * x_opt / (U512::from(pair_a.reserve1) + x_opt);
-    let p = (q * x_opt) / (r + s * x_opt) - x_opt; // - gas_price;
+    let p = (q * x_opt) / (r + s * x_opt) - x_opt;
+    // println!("WETH:TOKEN = {}:{}, TOKEN:WETH = {}:{}", pair_a.reserve0, pair_a.reserve1, pair_b.reserve1, pair_b.reserve0);
     Some((x_opt, alt_amount, p))
 }
 

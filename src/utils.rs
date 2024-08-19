@@ -6,7 +6,7 @@ pub struct Config {
     pub http: Arc<SignerMiddleware<Provider<Http>, Wallet<SigningKey>>>,
     #[allow(dead_code)]
     pub wss: Arc<Provider<Ws>>,
-    pub max_bal: U512
+    pub max_bal: u64
 }
 
 impl Config {
@@ -15,7 +15,6 @@ impl Config {
         let network = std::env::var("NETWORK_RPC").expect("missing NETWORK_RPC");
         let provider: Provider<Http> = Provider::<Http>::try_from(network).unwrap();
         let middleware = Arc::new(setup_signer(provider.clone()).await);
-        println!("checkpoint");
         let ws_network = std::env::var("NETWORK_WSS").expect("missing NETWORK_WSS");
         let ws_provider: Provider<Ws> = Provider::<Ws>::connect(ws_network).await.unwrap();
         let mb = std::env::var("MAX_BALANCE").expect("missing MAX_BALANCE").parse().unwrap();

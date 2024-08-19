@@ -9,13 +9,12 @@ else
   echo "$ENV_FILE already exists. It will be updated with new values."
 fi
 
-read -p "Enter the API key for NETWORK_RPC: " RPC_API_KEY
-read -p "Enter the API key for NETWORK_WSS: " WSS_API_KEY
+read -p "Enter the API key for RPC and WSS: " API_KEY
 read -p "Enter the private key for throwaway WETH wallet: " PRIVATE_KEY
 read -p "Enter max balance: " MAX_BALANCE
 
-NETWORK_RPC="https://mainnet.infura.io/v3/$RPC_API_KEY"
-NETWORK_WSS="wss://mainnet.infura.io/ws/v3/$WSS_API_KEY"
+NETWORK_RPC="https://mainnet.infura.io/v3/$API_KEY"
+NETWORK_WSS="wss://mainnet.infura.io/ws/v3/$API_KEY"
 PRIVATE_KEY="$PRIVATE_KEY"
 MAX_BALANCE="$MAX_BALANCE"
 
