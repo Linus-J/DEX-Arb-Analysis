@@ -11,7 +11,7 @@ async fn main() -> eyre::Result<()> {
 
     let factory_addresses = vec![
         UNISWAP_FACTORY,
-        // UNISWAPV3_FACTORY,
+        PANCAKESWAP_FACTORY,
         SUSHISWAP_FACTORY,
     ]
     .into_iter()

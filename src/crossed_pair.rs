@@ -1,5 +1,5 @@
 #![allow(unused)]
-use crate::address_book::{UniQuery, UNISWAP_ROUTER, UNISWAPV3_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS};
+use crate::address_book::{UniQuery, UNISWAP_ROUTER, PANCAKESWAP_ROUTER, SUSHISWAP_ROUTER, WETH_ADDRESS};
 use crate::utils::*;
 use ethers::{abi::ethereum_types::U512, prelude::*, utils::{format_ether, parse_ether}};
 
@@ -182,6 +182,7 @@ pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U256) -> Option<(U512
     }
 
     let r2 = r.checked_pow(U512::from(2i32)).expect("power overflow");
+    // Include estimate for tx fee
     let mut x_opt = (r2 + ((q * r - r2) / s)).integer_sqrt() - r;
     if x_opt == U512::from(0u128) {
         println!("No margin for profit");
@@ -192,7 +193,8 @@ pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U256) -> Option<(U512
         x_opt = U512::from(max_bal.as_u128());
     }
     let alt_amount = U512::from(pair_a.reserve0) * x_opt / (U512::from(pair_a.reserve1) + x_opt);
-    let p = (q * x_opt) / (r + s * x_opt) - x_opt;
+    // Include estimate for tx fee
+    let p = ((q * x_opt) / (r + s * x_opt)) - x_opt; // *497/500
     // println!("WETH:TOKEN = {}:{}, TOKEN:WETH = {}:{}", pair_a.reserve0, pair_a.reserve1, pair_b.reserve1, pair_b.reserve0);
     Some((x_opt, alt_amount, p))
 }

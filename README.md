@@ -5,7 +5,7 @@ This tool will attempt to detect a profitable transaction and upload it to the n
 ## Features
 
 - Query Uniswap pairs available
-- Find matching pairs across different exchanges (UniswapV2, UniswapV3, Sushiswap)
+- Find matching pairs across different exchanges (UniswapV2, PancakeSwapV2, SushiSwapV2)
 - Update pair reserves
 - Find arbitrage opportunities using optimal input
 
