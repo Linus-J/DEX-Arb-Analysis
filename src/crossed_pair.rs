@@ -64,17 +64,19 @@ where
             .await
             .unwrap();
 
-        let min_weth = parse_ether(500).unwrap();   // Filter out pairs that have more than 500 WETH
+        let min_weth = parse_ether(500).unwrap();   // Filter out pairs that have less than 500 WETH
 
         for (new_reserve, pair) in std::iter::zip(&reserves, self.get_all_pair_addresses()) {
             let weth_address = &WETH_ADDRESS.parse::<Address>().unwrap();
+            // Normalise so that reserve0 = WETH, reserve1 = token
             let (reserve0, reserve1) = if &pair.token0 == weth_address {
-                (new_reserve[1], new_reserve[0])
+                (new_reserve[0], new_reserve[1])   // token0 is WETH → reserve0 is WETH
             } else {
-                (new_reserve[0], new_reserve[1])
+                (new_reserve[1], new_reserve[0])   // token1 is WETH → reserve0 is WETH
             };
 
-            if reserve0 >= min_weth || reserve1 >= min_weth {
+            // Only keep the pair if it has at least 500 WETH liquidity on the WETH side
+            if reserve0 >= min_weth {
                 let updated_reserve = Reserve {
                     reserve0,
                     reserve1,
@@ -102,11 +104,12 @@ where
         let config = Config::new().await;
         let gas_price = U256::from(config.http.get_gas_price().await.unwrap());
         let mb = parse_ether(max_bal).unwrap();
-        if (gas_price >= mb){
-            println!("Gas price = {} exceeds max balance = {}.", format_ether(gas_price.as_u128()), max_bal);
-        }
-        else {
-            let adjusted_bal = mb - gas_price;
+        let gas_limit = U256::from(300_000u64); // conservative estimate for a 2-hop arb
+        let gas_cost = gas_price * gas_limit;
+        if gas_cost >= mb {
+            println!("Gas cost {} ETH exceeds max balance {} ETH.", format_ether(gas_cost), format_ether(mb));
+        } else {
+            let adjusted_bal = mb - gas_cost;
             for market in &mut self.markets {
                 market.find_arbitrage_opportunity(adjusted_bal).await;
             }
@@ -123,28 +126,25 @@ pub struct TokenMarket<'a> {
 
 impl<'a> TokenMarket<'a> {
     pub async fn find_arbitrage_opportunity(&self, max_bal: U256) {
-        for pair_a in &self.pairs {
-            for pair_b in &self.pairs {
-                if let Some((x, _alt_amount, profit)) = profit(
+        for (i, pair_a) in self.pairs.iter().enumerate() {
+            for (j, pair_b) in self.pairs.iter().enumerate() {
+                if i == j { continue; }
+                if let Some((x, profit)) = profit(
                     pair_a.reserve.as_ref().unwrap(),
                     pair_b.reserve.as_ref().unwrap(),
                     max_bal,
                 ) { 
-                    let token = *self.token;
-                    let pair1 = pair_a.address;
-                    let pair2 = pair_b.address;
-                    let eth1 = parse_ether(x).unwrap();
                     println!("\n---------------------------------- SIMULATED ARB ----------------------------------------");
-                    println!("Token: {:?}", token);
-                    println!("Pair 1: {:?}", pair_a.address);
-                    println!("Pair 2: {:?}", pair_b.address);
-                    println!("Send {} WETH to receive potential profit of {} WETH", format_ether(x.as_u128()), format_ether(profit.as_u128()));
+                    println!("Token: {:?}", self.token);
+                    println!("Pair 1 (buy token): {:?}", pair_a.address);
+                    println!("Pair 2 (sell token): {:?}", pair_b.address);
+                    println!("Send {} WETH to receive potential profit of {} WETH", format_ether(x), format_ether(profit));
                     println!("------------------------------------------------------------------------------------------");
                 }
             }
         }
-        }
     }
+}
 
 
 
@@ -172,31 +172,85 @@ impl Reserve {
 }
 
 //Fix accuracy of profit function
-pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U256) -> Option<(U512, U512, U512)> {
-    let q = U512::from(pair_a.reserve0 * pair_b.reserve1);
-    let r = U512::from(pair_b.reserve0 * pair_a.reserve1);
-    let s = U512::from(pair_a.reserve0 + pair_b.reserve0);
-    if r > q {
-        println!("No profit due to reserve ratios");
+pub fn profit(pair_a: &Reserve, pair_b: &Reserve, max_bal: U256) -> Option<(U256, U256)> {
+    // reserve0 = WETH, reserve1 = token (both pairs normalised by caller)
+    // Direction: buy token on pair_a (WETH → token), sell token on pair_b (token → WETH)
+    // Uniswap V2 fee: 0.3%, effective multiplier is 997/1000
+
+    let ra0 = pair_a.reserve0; // WETH in pair_a
+    let ra1 = pair_a.reserve1; // token in pair_a
+    let rb0 = pair_b.reserve0; // WETH in pair_b
+    let rb1 = pair_b.reserve1; // token in pair_b
+
+    // No opportunity if price on pair_b is not higher than pair_a
+    // price_a = ra0/ra1, price_b = rb0/rb1
+    // Need rb0*ra1 > ra0*rb1 to profit by buying on pair_a and selling on pair_b
+    // Use U512 to avoid overflow when multiplying two U256 reserve values
+    let ra0_512 = U512::from(ra0);
+    let ra1_512 = U512::from(ra1);
+    let rb0_512 = U512::from(rb0);
+    let rb1_512 = U512::from(rb1);
+    if rb0_512 * ra1_512 <= ra0_512 * rb1_512 {
         return None;
     }
 
-    let r2 = r.checked_pow(U512::from(2i32)).expect("power overflow");
-    // Include estimate for tx fee
-    let mut x_opt = (r2 + ((q * r - r2) / s)).integer_sqrt() - r;
-    if x_opt == U512::from(0u128) {
-        println!("No margin for profit");
+    // Optimal input using the standard two-hop formula with 0.3% fee per hop:
+    // x* = (sqrt(997^2 * ra0 * ra1 * rb0 * rb1) - 1000 * ra0 * rb1) / (997 * ra1 + 1000 * rb0)
+    // Use U512 to avoid overflow
+    let f = U512::from(997u64);
+    let g = U512::from(1000u64);
+
+    let ra0_ = ra0_512;
+    let ra1_ = ra1_512;
+    let rb0_ = rb0_512;
+    let rb1_ = rb1_512;
+
+    let under_sqrt = f * f * ra0_ * ra1_ * rb0_ * rb1_;
+    let sqrt_val = under_sqrt.integer_sqrt();
+    let sub = g * ra0_ * rb1_;
+
+    if sqrt_val <= sub {
         return None;
     }
-    // Clean up type conversion
-    if (U512::from(max_bal.as_u128())<=x_opt){
-        x_opt = U512::from(max_bal.as_u128());
+
+    let denom = f * ra1_ + g * rb0_;
+    if denom.is_zero() {
+        return None;
     }
-    let alt_amount = U512::from(pair_a.reserve0) * x_opt / (U512::from(pair_a.reserve1) + x_opt);
-    // Include estimate for tx fee
-    let p = ((q * x_opt) / (r + s * x_opt)) - x_opt; // *497/500
-    // println!("WETH:TOKEN = {}:{}, TOKEN:WETH = {}:{}", pair_a.reserve0, pair_a.reserve1, pair_b.reserve1, pair_b.reserve0);
-    Some((x_opt, alt_amount, p))
+
+    let x_opt_512 = (sqrt_val - sub) / denom;
+
+    // Clamp to max_bal
+    let max_512 = U512::from(max_bal);
+    let x_opt_512 = x_opt_512.min(max_512);
+
+    if x_opt_512.is_zero() {
+        return None;
+    }
+
+    // Simulate actual two-hop swap to get real profit
+    // Step 1: WETH → token on pair_a
+    // amount_out = (fee * amount_in * reserve_out) / (1000 * reserve_in + fee * amount_in)
+    let weth_in_997 = f * x_opt_512;
+    let token_out = weth_in_997 * ra1_ / (g * ra0_ + weth_in_997);
+
+    // Step 2: token → WETH on pair_b
+    // amount_out = (fee * amount_in * reserve_out) / (1000 * reserve_in + fee * amount_in)
+    let token_in_997 = f * token_out;
+    let weth_out = token_in_997 * rb0_ / (g * rb1_ + token_in_997);
+
+    // Profit is only real if weth_out > x_opt
+    if weth_out <= x_opt_512 {
+        return None;
+    }
+
+    let profit_512 = weth_out - x_opt_512;
+
+    // Convert back to U256 (safe since these are bounded by reserves which are U256)
+    let x_opt = U256::try_from(x_opt_512).ok()?;
+    let profit = U256::try_from(profit_512).ok()?;
+
+    Some((x_opt, profit))
 }
 
 use std::fs::File;
