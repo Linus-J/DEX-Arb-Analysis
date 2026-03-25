@@ -249,9 +249,11 @@ pub async fn fetch_v3_pools_for_tokens<M: Middleware>(
             };
 
             // Discover initialised ticks via tickBitmap.
+            // MAX_TICK = 887272 is the Uniswap V3 absolute tick boundary.
             let mut ticks: BTreeMap<i32, TickEntry> = BTreeMap::new();
             let max_word =
-                ((887272i32 / tick_spacing) / 256 + 1).min(i16::MAX as i32) as i16;
+                ((uniswap_v3_math::tick_math::MAX_TICK / tick_spacing) / 256 + 1)
+                    .min(i16::MAX as i32) as i16;
             for word_pos in -max_word..=max_word {
                 let bitmap = match pool_contract.tick_bitmap(word_pos).call().await {
                     Ok(b) => b,
@@ -299,13 +301,14 @@ mod tests {
     use ethers::types::U256;
 
     fn make_simple_pool(fee: u32, sqrt_price_x96: U256, tick: i32, liquidity: u128) -> V3Pool {
+        use uniswap_v3_math::tick_math::{MIN_TICK, MAX_TICK};
         // A pool with a single liquidity range (no tick crossings needed).
         // Use MIN_TICK and MAX_TICK as the only ticks so the swap never crosses them
         // for small input amounts.
         let mut ticks = BTreeMap::new();
         // liquidityNet at lower bound is +liquidity, at upper bound is -liquidity.
-        ticks.insert(-887272, (liquidity as i128, liquidity));
-        ticks.insert(887272, (-(liquidity as i128), liquidity));
+        ticks.insert(MIN_TICK, (liquidity as i128, liquidity));
+        ticks.insert(MAX_TICK, (-(liquidity as i128), liquidity));
         V3Pool {
             address: H160::zero(),
             token0: H160::zero(),
