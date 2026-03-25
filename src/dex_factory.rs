@@ -95,8 +95,6 @@ where
         let batch_size = U256::from(500u32);
         let mut start = U256::from(0u32);
 
-        let batch_limit = 10;
-        let mut count = 0;
         let mut markets: Vec<[H160; 3]> = vec![];
         loop {
             let stop = start + batch_size;
@@ -108,14 +106,13 @@ where
                 .await
                 .unwrap();
 
-            count += 1;
             start = stop;
 
             let pair_length = pairs.len();
 
             markets.extend(pairs);
 
-            if pair_length < batch_size.as_usize() || count > batch_limit {
+            if pair_length < batch_size.as_usize() {
                 dbg!(markets.len());
                 break;
             }

@@ -1,7 +1,8 @@
 #![allow(unused)]
 
 use ethers::prelude::*;
-use rusty_john::{utils::*, crossed_pair::*, dex_factory::*, address_book::*};
+use futures::StreamExt;
+use rusty_john::{utils::*, crossed_pair::*, dex_factory::*, address_book::*, v3_pool::*};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
@@ -27,11 +28,30 @@ async fn main() -> eyre::Result<()> {
     let grouped_pairs =
         get_markets_by_token(factory_addresses, &flash_query_contract, config.http.clone()).await;
 
-    let mut crossed_pair = CrossedPairManager::new(&grouped_pairs, &flash_query_contract);
+    // Discover V3 pools for all tokens found in V2 markets.
+    let token_list: Vec<H160> = grouped_pairs.iter().map(|(t, _)| *t).collect();
+    let v3_factory = UNISWAP_V3_FACTORY.parse::<Address>().unwrap();
+    let v3_pools = fetch_v3_pools_for_tokens(
+        &token_list,
+        WETH_ADDRESS.parse().unwrap(),
+        v3_factory,
+        config.http.clone(),
+    )
+    .await;
+
+    let mut crossed_pair = CrossedPairManager::new(&grouped_pairs, &flash_query_contract, v3_pools);
     crossed_pair.write_tokens();
-    // Fill with pair price data somehow
+
+    // Initial snapshot.
     crossed_pair.update_reserve().await;
-    // Find arb
-    crossed_pair.find_arbitrage_opportunities(config.max_bal.clone()).await;
+    crossed_pair.find_arbitrage_opportunities(config.max_bal).await;
+
+    // Subscribe to new blocks and refresh reserves + run analysis on every block.
+    let mut stream = config.wss.subscribe_blocks().await?;
+    while let Some(_block) = stream.next().await {
+        crossed_pair.update_reserve().await;
+        crossed_pair.find_arbitrage_opportunities(config.max_bal).await;
+    }
+
     Ok(())
 }
