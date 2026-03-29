@@ -3007,6 +3007,8 @@ dependencies = [
  "eyre",
  "futures",
  "itertools 0.10.5",
+ "serde",
+ "serde_json",
  "tokio",
  "uniswap_v3_math",
 ]

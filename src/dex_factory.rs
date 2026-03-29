@@ -22,13 +22,15 @@ where
     let weth_address = &WETH_ADDRESS.parse::<Address>().unwrap();
 
     let mut pairs: Vec<[H160; 3]> = vec![];
-    for factory in factories {
+    for (i, factory) in factories.into_iter().enumerate() {
+        println!("[V2] Factory {}: {:?}", i + 1, factory.factory_contract.address());
         let market_pairs = factory
             .get_markets()
             .await
             .into_iter()
             .collect::<Vec<[H160; 3]>>();
 
+        println!("[V2] Factory {}: {} pairs fetched.", i + 1, market_pairs.len());
         for pair in market_pairs {
             pairs.push(pair.to_owned());
         }
@@ -94,10 +96,15 @@ where
     pub async fn get_markets(&self) -> Vec<[H160; 3]> {
         let batch_size = U256::from(500u32);
         let mut start = U256::from(0u32);
+        let mut batch_num = 0usize;
+        let pair_limit = std::env::var("PAIR_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
 
         let mut markets: Vec<[H160; 3]> = vec![];
         loop {
             let stop = start + batch_size;
+            batch_num += 1;
 
             let pairs = self
                 .flash_query_contract
@@ -109,12 +116,22 @@ where
             start = stop;
 
             let pair_length = pairs.len();
-
             markets.extend(pairs);
 
+            if batch_num % 50 == 0 {
+                println!("[V2]   ... batch {}, {} pairs so far", batch_num, markets.len());
+            }
+
             if pair_length < batch_size.as_usize() {
-                dbg!(markets.len());
                 break;
+            }
+
+            if let Some(limit) = pair_limit {
+                if markets.len() >= limit {
+                    markets.truncate(limit);
+                    println!("[V2]   PAIR_LIMIT={} reached, stopping early.", limit);
+                    break;
+                }
             }
         }
         markets

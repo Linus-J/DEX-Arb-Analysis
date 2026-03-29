@@ -10,7 +10,7 @@ use crate::address_book::{UniV3Factory, UniV3Pool as UniV3PoolContract, WETH_ADD
 type TickEntry = (i128, u128);
 
 /// Off-chain representation of a Uniswap V3 pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct V3Pool {
     pub address: H160,
     pub token0: H160,
@@ -196,8 +196,12 @@ pub async fn fetch_v3_pools_for_tokens<M: Middleware>(
     let fee_tiers: [u32; 3] = [500, 3000, 10000];
     let factory = UniV3Factory::new(factory_addr, client.clone());
     let mut pools = Vec::new();
+    let total_tokens = tokens.len();
 
-    for &token in tokens {
+    for (token_idx, &token) in tokens.iter().enumerate() {
+        if token_idx % 100 == 0 {
+            println!("[V3]   {}/{} tokens processed, {} pools found so far...", token_idx, total_tokens, pools.len());
+        }
         for &fee in &fee_tiers {
             // Query factory for pool address.
             let pool_addr = match factory.get_pool(token, weth, fee).call().await {
@@ -250,10 +254,16 @@ pub async fn fetch_v3_pools_for_tokens<M: Middleware>(
 
             // Discover initialised ticks via tickBitmap.
             // MAX_TICK = 887272 is the Uniswap V3 absolute tick boundary.
-            let mut ticks: BTreeMap<i32, TickEntry> = BTreeMap::new();
             let max_word =
                 ((uniswap_v3_math::tick_math::MAX_TICK / tick_spacing) / 256 + 1)
                     .min(i16::MAX as i32) as i16;
+            println!(
+                "[V3]   Pool {:?} (fee {}) — scanning {} bitmap words for ticks...",
+                pool_addr,
+                fee,
+                max_word * 2 + 1,
+            );
+            let mut ticks: BTreeMap<i32, TickEntry> = BTreeMap::new();
             for word_pos in -max_word..=max_word {
                 let bitmap = match pool_contract.tick_bitmap(word_pos).call().await {
                     Ok(b) => b,

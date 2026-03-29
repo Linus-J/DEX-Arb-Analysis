@@ -1,11 +1,48 @@
 #![allow(unused)]
 use crate::address_book::{
-    UniQuery, MIN_PROFIT_WETH, MIN_WETH_LIQUIDITY, UNISWAP_ROUTER, PANCAKESWAP_ROUTER,
+    UniQuery, UniV3Pool as UniV3PoolContract,
+    MIN_PROFIT_WETH, MIN_WETH_LIQUIDITY, UNISWAP_ROUTER, PANCAKESWAP_ROUTER,
     SUSHISWAP_ROUTER, WETH_ADDRESS,
 };
 use crate::utils::*;
 use crate::v3_pool::V3Pool;
 use ethers::{abi::ethereum_types::U512, prelude::*, utils::{format_ether, parse_ether}};
+
+/// Returns true when the V2 pool's stored reserves appear stale relative to the V3 spot price.
+/// This happens with rebase tokens (e.g. AMPL) whose pool balance diverges from reserves.
+///
+/// Computes the tokens-per-WETH ratio from both sources using cross-multiplication
+/// (U512 to avoid overflow) and flags divergences greater than 1.5x.
+fn v2_reserves_stale(reserve0_weth: U256, reserve1_token: U256, pool: &V3Pool, weth: H160) -> bool {
+    if pool.sqrt_price_x96.is_zero() || reserve0_weth.is_zero() || reserve1_token.is_zero() {
+        return false;
+    }
+    // Scale sqrt down by 32 bits before squaring to stay within U512.
+    // This preserves enough precision for a ratio comparison with 1.5x tolerance.
+    let sqrt = U512::from(pool.sqrt_price_x96 >> 32u32);
+    let q128 = U512::one() << 128u32; // compensates for two 32-bit shifts
+    // v3 tokens-per-WETH  = sqrt^2 / Q128  (if WETH=token0)
+    //                      = Q128 / sqrt^2  (if WETH=token1)
+    let (v3_num, v3_den) = if pool.token0 == weth {
+        (sqrt * sqrt, q128)
+    } else {
+        let sq = sqrt * sqrt;
+        if sq.is_zero() { return false; }
+        (q128, sq)
+    };
+    // v2 tokens-per-WETH = reserve1 / reserve0
+    // Cross-multiply to compare without division:
+    //   v2/v3 = (reserve1 * v3_den) / (reserve0 * v3_num)
+    let v2_side = U512::from(reserve1_token) * v3_den;
+    let v3_side = U512::from(reserve0_weth) * v3_num;
+    if v3_side.is_zero() || v2_side.is_zero() {
+        return false;
+    }
+    // Flag if either side is more than 1.5x the other.
+    let scale = U512::from(3u32);
+    let two   = U512::from(2u32);
+    v2_side * two > v3_side * scale || v3_side * two > v2_side * scale
+}
 
 #[derive(Debug)]
 pub struct CrossedPairManager<'a, M>
@@ -57,19 +94,21 @@ where
         }
     }
 
-    pub async fn update_reserve(&mut self) {
+    pub async fn update_reserve(&mut self, block: Option<u64>) {
         let reserves = self
             .get_all_pair_addresses()
             .iter()
             .map(|pair| pair.address)
             .collect::<Vec<H160>>();
 
-        let reserves = self
+        let call = self
             .flash_query_contract
-            .get_reserves_by_pairs(reserves)
-            .call()
-            .await
-            .unwrap();
+            .get_reserves_by_pairs(reserves);
+        let call = match block {
+            Some(n) => call.block(BlockId::Number(n.into())),
+            None    => call,
+        };
+        let reserves = call.call().await.unwrap();
 
         for (new_reserve, pair) in std::iter::zip(&reserves, self.get_all_pair_addresses()) {
             let weth_address = &WETH_ADDRESS.parse::<Address>().unwrap();
@@ -102,10 +141,26 @@ where
             .collect::<Vec<&mut Pair>>()
     }
 
-    pub async fn find_arbitrage_opportunities(&mut self, max_bal: u64) {
-        let config = Config::new().await;
-        let gas_price = U256::from(config.http.get_gas_price().await.unwrap());
+    /// Refresh each V3 pool's spot price (slot0 + liquidity) at a specific historical block.
+    /// Ticks are not refetched — they change rarely and the snapshot approximation is sufficient.
+    pub async fn update_v3_spot_prices(&mut self, block: u64) {
+        let client = self.flash_query_contract.client();
+        let block_id = BlockId::Number(block.into());
+        for pool in &mut self.v3_pools {
+            let contract = UniV3PoolContract::new(pool.address, client.clone());
+            if let Ok(slot0) = contract.slot_0().block(block_id).call().await {
+                pool.sqrt_price_x96 = slot0.0;
+                pool.tick = slot0.1;
+            }
+            if let Ok(liq) = contract.liquidity().block(block_id).call().await {
+                pool.liquidity = liq;
+            }
+        }
+    }
+
+    pub fn find_arbitrage_opportunities(&mut self, max_bal: u64, gas_price: U256) {
         let mb = parse_ether(max_bal).unwrap();
+        let debug_arb = std::env::var("DEBUG_ARB").as_deref() == Ok("true");
 
         // --- V2 ↔ V2 arb ---
         let gas_limit_v2 = U256::from(180_000u64);
@@ -162,6 +217,14 @@ where
                 for v3_pool in v3_pools.iter() {
                     let weth_in = adjusted_bal_v3;
 
+                    // Skip this pair entirely if V2 reserves are temporally mismatched with V3.
+                    if v2_reserves_stale(reserve.reserve0, reserve.reserve1, v3_pool, weth_addr) {
+                        if debug_arb {
+                            println!("  [SKIP V2↔V3] Stale V2 reserves (V2/V3 price divergence >1.5x). Token {:?}", market.token);
+                        }
+                        continue;
+                    }
+
                     // Buy token on V2, sell token on V3.
                     let token_out_v2 =
                         v2_amount_out(weth_in, reserve.reserve0, reserve.reserve1);
@@ -196,7 +259,12 @@ where
                                 v2_amount_out(token_out_v3, reserve.reserve1, reserve.reserve0);
                             if weth_out_v2 > weth_in {
                                 let arb_profit = weth_out_v2 - weth_in;
-                                if arb_profit >= MIN_PROFIT_WETH {
+                                // Suppress if V2 reserves appear stale (e.g. rebase tokens).
+                                if v2_reserves_stale(reserve.reserve0, reserve.reserve1, v3_pool, weth_addr) {
+                                    if debug_arb {
+                                        println!("  [SKIP V3→V2] Stale V2 reserves detected (V2/V3 price divergence >1.5x). Token {:?}", market.token);
+                                    }
+                                } else if arb_profit >= MIN_PROFIT_WETH {
                                     println!(
                                         "\n----------- SIMULATED ARB (V3 buy → V2 sell) -----------"
                                     );
@@ -209,6 +277,22 @@ where
                                         format_ether(arb_profit)
                                     );
                                     println!("---------------------------------------------------------");
+                                    if debug_arb {
+                                        let v3_rate = if !token_out_v3.is_zero() { weth_in / token_out_v3 } else { U256::zero() };
+                                        let v2_rate = if !reserve.reserve1.is_zero() { reserve.reserve0 / reserve.reserve1 } else { U256::zero() };
+                                        println!("  [DEBUG V3→V2]");
+                                        println!("    V3 fee={} tick={} liquidity={}", v3_pool.fee, v3_pool.tick, v3_pool.liquidity);
+                                        println!("    WETH in:               {} ({} WETH)", weth_in, format_ether(weth_in));
+                                        println!("    token_out_v3 (raw):    {}", token_out_v3);
+                                        println!("    V3 rate (wei/raw_tok): {}", v3_rate);
+                                        println!("    V2 reserve0 (WETH):    {} ({} WETH)", reserve.reserve0, format_ether(reserve.reserve0));
+                                        println!("    V2 reserve1 (token):   {} (raw)", reserve.reserve1);
+                                        println!("    V2 rate (wei/raw_tok): {}", v2_rate);
+                                        println!("    weth_out_v2:           {} ({} WETH)", weth_out_v2, format_ether(weth_out_v2));
+                                        if !v3_rate.is_zero() && v2_rate > v3_rate * U256::from(2u32) {
+                                            println!("    WARNING: V2 rate >2x V3 — reserves likely stale (rebase token?).");
+                                        }
+                                    }
                                 }
                             }
                         }

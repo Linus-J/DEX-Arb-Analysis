@@ -12,10 +12,20 @@ pub struct Config {
 impl Config {
     pub async fn new() -> Self {
         dotenv::dotenv().ok();
-        let network = std::env::var("NETWORK_RPC").expect("missing NETWORK_RPC");
+        let use_anvil = std::env::var("USE_ANVIL").as_deref() == Ok("true");
+        let network = if use_anvil {
+            println!("[CONFIG] USE_ANVIL=true — connecting to local Anvil fork at http://127.0.0.1:8545");
+            "http://127.0.0.1:8545".to_string()
+        } else {
+            std::env::var("NETWORK_RPC").expect("missing NETWORK_RPC")
+        };
         let provider: Provider<Http> = Provider::<Http>::try_from(network).unwrap();
         let middleware = Arc::new(setup_signer(provider.clone()).await);
-        let ws_network = std::env::var("NETWORK_WSS").expect("missing NETWORK_WSS");
+        let ws_network = if use_anvil {
+            "ws://127.0.0.1:8545".to_string()
+        } else {
+            std::env::var("NETWORK_WSS").expect("missing NETWORK_WSS")
+        };
         let ws_provider: Provider<Ws> = Provider::<Ws>::connect(ws_network).await.unwrap();
         let mb = std::env::var("MAX_BALANCE").expect("missing MAX_BALANCE").parse().unwrap();
         Self {
