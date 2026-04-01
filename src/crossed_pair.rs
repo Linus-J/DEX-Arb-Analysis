@@ -536,6 +536,33 @@ fn write_tokens_to_file(tokens: Vec<H160>) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use ethers::utils::parse_ether;
+    use std::collections::BTreeMap;
+    use crate::v3_pool::V3Pool;
+
+    /// Build a minimal V3Pool with token0=WETH, token1=fake_token at the given sqrt price.
+    /// The pool has a single full-range position so any swap completes in one step.
+    fn make_v3_pool(sqrt_price_x96: U256, tick: i32, liquidity: u128) -> V3Pool {
+        let weth: H160 = crate::address_book::WETH_ADDRESS.parse().unwrap();
+        let fake_token: H160 = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let liq_i = liquidity as i128;
+        let mut ticks = BTreeMap::new();
+        // Full-range position: MIN_TICK lower, MAX_TICK upper.
+        ticks.insert(-887272i32, (liq_i, liquidity));
+        ticks.insert(887272i32, (-liq_i, liquidity));
+        V3Pool {
+            address: H160::zero(),
+            token0: weth,
+            token1: fake_token,
+            fee: 3000,
+            sqrt_price_x96,
+            tick,
+            liquidity,
+            tick_spacing: 60,
+            ticks,
+        }
+    }
 
     // 1. Balanced pools → no opportunity
     #[test]
@@ -585,5 +612,134 @@ mod tests {
         let pair_a = Reserve::new(U256::zero(), parse_ether(1000).unwrap());
         let pair_b = Reserve::new(parse_ether(1000).unwrap(), parse_ether(500).unwrap());
         assert!(profit(&pair_a, &pair_b, parse_ether(10).unwrap()).is_none());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // V2 ↔ V3 detection tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Q96 constant used across V3 tests: 2^96
+    fn q96() -> U256 {
+        U256::from(1u64) << 96u32
+    }
+
+    // 6. Token cheaper on V2 → buy V2, sell V3 should profit
+    // V2: 120 tokens/WETH  (lots of token relative to WETH)
+    // V3: 100 tokens/WETH  (fewer tokens for WETH → token is more valuable here)
+    // Strategy: spend 1 WETH on V2 (~119.5 tokens), then sell those tokens on V3 → > 1 WETH back
+    #[test]
+    fn test_v2_buy_v3_sell_arb_detected() {
+        // sqrt_price_x96 = 10 * Q96  →  P = 100 tokens/WETH (token0=WETH)
+        let pool = make_v3_pool(q96() * U256::from(10u64), 46054, 1_000_000_000_000_000_000_000_000u128);
+
+        let weth_reserve  = parse_ether(1000).unwrap();
+        let token_reserve = parse_ether(120_000).unwrap(); // 120 tokens per WETH on V2
+        let weth_in = parse_ether(1).unwrap();
+
+        // Step 1: buy token on V2 (cheaper source)
+        let token_out = v2_amount_out(weth_in, weth_reserve, token_reserve);
+        assert!(!token_out.is_zero(), "V2 should produce tokens");
+
+        // Step 2: sell token on V3 (where token is worth more WETH)
+        let weth_out = pool.simulate_swap_token_in(token_out).expect("V3 sim must succeed");
+        assert!(
+            weth_out > weth_in,
+            "V2 buy → V3 sell: expected profit, got weth_out={weth_out} <= weth_in={weth_in}"
+        );
+    }
+
+    // 7. Token cheaper on V3 → buy V3, sell V2 should profit
+    // V3: 121 tokens/WETH  (sqrt=11*Q96 → P=121)
+    // V2: 100 tokens/WETH
+    // Strategy: spend 1 WETH on V3 (~120.6 tokens), then sell those tokens on V2 → > 1 WETH back
+    #[test]
+    fn test_v3_buy_v2_sell_arb_detected() {
+        // sqrt_price_x96 = 11 * Q96  →  P = 121 tokens/WETH
+        let pool = make_v3_pool(q96() * U256::from(11u64), 47960, 1_000_000_000_000_000_000_000_000u128);
+
+        let weth_reserve  = parse_ether(1000).unwrap();
+        let token_reserve = parse_ether(100_000).unwrap(); // 100 tokens per WETH on V2
+        let weth_in = parse_ether(1).unwrap();
+
+        // Step 1: buy token on V3 (cheaper source, 121 tokens/WETH)
+        let token_out = pool.simulate_swap_weth_in(weth_in).expect("V3 sim must succeed");
+        assert!(!token_out.is_zero(), "V3 should produce tokens");
+
+        // Step 2: sell token on V2 (where token is worth more WETH)
+        let weth_out = v2_amount_out(token_out, token_reserve, weth_reserve);
+        assert!(
+            weth_out > weth_in,
+            "V3 buy → V2 sell: expected profit, got weth_out={weth_out} <= weth_in={weth_in}"
+        );
+    }
+
+    // 8. Equal prices V2 = V3 → neither direction profits (fees eat any gain)
+    #[test]
+    fn test_no_arb_equal_v2_v3_prices() {
+        // Both V2 and V3 at 100 tokens/WETH
+        let pool = make_v3_pool(q96() * U256::from(10u64), 46054, 1_000_000_000_000_000_000_000_000u128);
+
+        let weth_reserve  = parse_ether(1000).unwrap();
+        let token_reserve = parse_ether(100_000).unwrap();
+        let weth_in = parse_ether(1).unwrap();
+
+        // V2 buy → V3 sell: fees on both legs should leave us with less than we started
+        let token_from_v2 = v2_amount_out(weth_in, weth_reserve, token_reserve);
+        let weth_back_v3 = pool
+            .simulate_swap_token_in(token_from_v2)
+            .unwrap_or(U256::zero());
+        assert!(
+            weth_back_v3 < weth_in,
+            "Equal prices V2→V3: should not profit (fees), got weth_back={weth_back_v3}"
+        );
+
+        // V3 buy → V2 sell: same expectation
+        let token_from_v3 = pool
+            .simulate_swap_weth_in(weth_in)
+            .unwrap_or(U256::zero());
+        let weth_back_v2 = v2_amount_out(token_from_v3, token_reserve, weth_reserve);
+        assert!(
+            weth_back_v2 < weth_in,
+            "Equal prices V3→V2: should not profit (fees), got weth_back={weth_back_v2}"
+        );
+    }
+
+    // 9. v2_reserves_stale correctly flags a 2× price divergence
+    #[test]
+    fn test_stale_reserves_detected_at_2x() {
+        let weth: H160 = crate::address_book::WETH_ADDRESS.parse().unwrap();
+        // V3 at 100 tokens/WETH (token0 = WETH)
+        let pool = make_v3_pool(q96() * U256::from(10u64), 46054, 1_000_000u128);
+
+        // V2 at 200 tokens/WETH → 2× divergence → stale
+        let weth_res = parse_ether(1000).unwrap();
+        let tok_res  = parse_ether(200_000).unwrap();
+        assert!(
+            v2_reserves_stale(weth_res, tok_res, &pool, weth),
+            "2× price divergence must be flagged as stale"
+        );
+    }
+
+    // 10. v2_reserves_stale does NOT flag prices within 1.5× (including equal)
+    #[test]
+    fn test_stale_reserves_ok_within_threshold() {
+        let weth: H160 = crate::address_book::WETH_ADDRESS.parse().unwrap();
+        // V3 at 100 tokens/WETH
+        let pool = make_v3_pool(q96() * U256::from(10u64), 46054, 1_000_000u128);
+        let weth_res = parse_ether(1000).unwrap();
+
+        // Equal prices → not stale
+        let tok_equal = parse_ether(100_000).unwrap();
+        assert!(
+            !v2_reserves_stale(weth_res, tok_equal, &pool, weth),
+            "Equal prices must not be flagged as stale"
+        );
+
+        // 1.4× divergence → still within 1.5× threshold → not stale
+        let tok_14x = parse_ether(140_000).unwrap();
+        assert!(
+            !v2_reserves_stale(weth_res, tok_14x, &pool, weth),
+            "1.4× divergence must not be flagged as stale"
+        );
     }
 }
