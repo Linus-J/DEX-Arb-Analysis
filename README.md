@@ -27,7 +27,7 @@ It is a fork of the original [rusty-john](https://github.com/RenatoDev3/rusty-jo
 
 ## Environment setup
 
-Make an API key to query the chain with [Infura](https://app.infura.io/) — you need both an HTTP and a WebSocket endpoint.
+Make an API key to query the chain with [Infura](https://app.infura.io/) or [Alchemy](https://dashboard.alchemy.com/?a=)— you need both an HTTP and a WebSocket endpoint.
 
 Create a dummy ETH wallet with any wallet provider and retrieve the private key.
 
@@ -53,7 +53,7 @@ All tests are pure unit tests (no RPC calls):
 
     cargo test
 
-## Goals
+## Future directions
 
 - Extend to additional V3-compatible DEXes (e.g. PancakeSwap V3, SushiSwap V3)
 - Add incremental tick-state updates via `Swap`/`Mint`/`Burn` event subscriptions to keep V3 tick maps fresh without a full re-fetch
