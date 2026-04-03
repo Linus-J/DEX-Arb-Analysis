@@ -52,6 +52,9 @@ where
     flash_query_contract: &'a UniQuery<M>,
     markets: Vec<TokenMarket<'a>>,
     v3_pools: Vec<V3Pool>,
+    /// Precomputed index: non-WETH token → indices into `v3_pools`.
+    /// Rebuilt whenever `v3_pools` changes (only at startup).
+    v3_by_token: std::collections::HashMap<H160, Vec<usize>>,
 }
 
 impl<'a, M> CrossedPairManager<'a, M>
@@ -79,11 +82,29 @@ where
                     .collect::<Vec<Pair>>(),
             })
             .collect::<Vec<TokenMarket>>();
+        let v3_by_token = Self::build_v3_index(&v3_pools);
         Self {
             markets: pairs,
             flash_query_contract,
             v3_pools,
+            v3_by_token,
         }
+    }
+
+    /// Build the non-WETH token → V3 pool index from a slice of pools.
+    fn build_v3_index(pools: &[V3Pool]) -> std::collections::HashMap<H160, Vec<usize>> {
+        let weth_addr: H160 = WETH_ADDRESS.parse().unwrap();
+        let mut map: std::collections::HashMap<H160, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, pool) in pools.iter().enumerate() {
+            let token = if pool.token0 == weth_addr {
+                pool.token1
+            } else {
+                pool.token0
+            };
+            map.entry(token).or_default().push(i);
+        }
+        map
     }
 
     pub fn write_tokens(&mut self) {
@@ -179,19 +200,6 @@ where
         }
 
         // --- Mixed V2 ↔ V3 and V3 ↔ V3 arb ---
-        let weth_addr: H160 = WETH_ADDRESS.parse().unwrap();
-
-        // Group V3 pools by the non-WETH token.
-        let mut v3_by_token: std::collections::HashMap<H160, Vec<&V3Pool>> =
-            std::collections::HashMap::new();
-        for pool in &self.v3_pools {
-            let token = if pool.token0 == weth_addr {
-                pool.token1
-            } else {
-                pool.token0
-            };
-            v3_by_token.entry(token).or_default().push(pool);
-        }
 
         // Gas estimate for mixed/V3 arbs.
         let gas_limit_v3 = U256::from(200_000u64);
@@ -201,11 +209,14 @@ where
         }
         let adjusted_bal_v3 = mb - gas_cost_v3;
 
+        let weth_addr: H160 = WETH_ADDRESS.parse().unwrap();
         for market in &self.markets {
-            let v3_pools = match v3_by_token.get(market.token) {
+            let indices = match self.v3_by_token.get(market.token) {
                 Some(p) => p,
                 None => continue,
             };
+            let v3_pools: Vec<&V3Pool> =
+                indices.iter().map(|&i| &self.v3_pools[i]).collect();
 
             // V2 ↔ V3
             for v2_pair in &market.pairs {

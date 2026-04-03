@@ -196,6 +196,12 @@ impl V3Pool {
             }
         }
 
+        // If the iteration cap was hit before the full input was consumed, the output
+        // is only partial and would produce a false arb signal — return None.
+        if iter == max_iterations && !amount_remaining.is_zero() {
+            return None;
+        }
+
         if amount_out_total.is_zero() {
             None
         } else {
@@ -378,10 +384,15 @@ mod tests {
         // liquidityNet at lower bound is +liquidity, at upper bound is -liquidity.
         ticks.insert(MIN_TICK, (liquidity as i128, liquidity));
         ticks.insert(MAX_TICK, (-(liquidity as i128), liquidity));
+        // Set token0 = WETH so simulate_swap_weth_in / simulate_swap_token_in resolve correctly.
+        let weth: H160 = WETH_ADDRESS.parse().unwrap();
+        let dummy_token: H160 = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
         V3Pool {
             address: H160::zero(),
-            token0: H160::zero(),
-            token1: H160::zero(),
+            token0: weth,
+            token1: dummy_token,
             fee,
             sqrt_price_x96,
             tick,
