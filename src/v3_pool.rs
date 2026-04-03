@@ -26,29 +26,48 @@ pub struct V3Pool {
 }
 
 impl V3Pool {
+    fn weth_zero_for_one(&self, weth_in: bool) -> Option<bool> {
+        let weth: H160 = WETH_ADDRESS.parse().expect("valid WETH address");
+        let token0_is_weth = self.token0 == weth;
+        let token1_is_weth = self.token1 == weth;
+
+        let zero_for_one = match (token0_is_weth, token1_is_weth, weth_in) {
+            // WETH -> token
+            (true, false, true) => true,
+            (false, true, true) => false,
+            // token -> WETH
+            (true, false, false) => false,
+            (false, true, false) => true,
+            _ => {
+                debug_assert!(
+                    false,
+                    "simulate_swap_*_weth API called for pool without exactly one WETH side"
+                );
+                return None;
+            }
+        };
+
+        Some(zero_for_one)
+    }
+
     /// Simulate a swap of `amount_in` of the WETH-side token through this pool.
-    /// Returns the amount of the other token received, or None if the pool has no liquidity.
+    /// Returns the amount of the other token received, or None if the pool has no liquidity
+    /// or if the pool does not contain exactly one WETH side.
     pub fn simulate_swap_weth_in(&self, amount_in: U256) -> Option<U256> {
         if self.liquidity == 0 {
             return None;
         }
-        // Determine direction: zero_for_one means swapping token0 → token1.
-        // If WETH = token0 we pay token0 (WETH) and receive token1 → zero_for_one = true.
-        // If WETH = token1 we pay token1 (WETH) and receive token0 → zero_for_one = false.
-        // Default (test: both zero) → zero_for_one = true.
-        let weth: H160 = WETH_ADDRESS.parse().expect("valid WETH address");
-        let zero_for_one = self.token0 == weth || self.token1 != weth;
+        let zero_for_one = self.weth_zero_for_one(true)?;
         self.simulate_swap(amount_in, zero_for_one)
     }
 
     /// Simulate the reverse swap (non-WETH token → WETH). Returns WETH out.
+    /// Returns None if the pool has no liquidity or does not contain exactly one WETH side.
     pub fn simulate_swap_token_in(&self, amount_in: U256) -> Option<U256> {
         if self.liquidity == 0 {
             return None;
         }
-        let weth: H160 = WETH_ADDRESS.parse().expect("valid WETH address");
-        // Opposite direction to simulate_swap_weth_in.
-        let zero_for_one = self.token1 == weth || self.token0 != weth;
+        let zero_for_one = self.weth_zero_for_one(false)?;
         self.simulate_swap(amount_in, zero_for_one)
     }
 
@@ -257,14 +276,54 @@ pub async fn fetch_v3_pools_for_tokens<M: Middleware>(
             let max_word =
                 ((uniswap_v3_math::tick_math::MAX_TICK / tick_spacing) / 256 + 1)
                     .min(i16::MAX as i32) as i16;
-            println!(
-                "[V3]   Pool {:?} (fee {}) — scanning {} bitmap words for ticks...",
-                pool_addr,
-                fee,
-                max_word * 2 + 1,
-            );
+            let current_compressed = tick.div_euclid(tick_spacing);
+            let current_word = current_compressed.div_euclid(256).clamp(
+                -(max_word as i32),
+                max_word as i32,
+            ) as i16;
+            let configured_word_limit = std::env::var("V3_POOL_BITMAP_SCAN_WORD_LIMIT")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok())
+                .filter(|&limit| limit > 0);
+            let (scan_start_word, scan_end_word) = if let Some(limit) = configured_word_limit {
+                let half_window = ((limit as i32) - 1) / 2;
+                let mut start = current_word as i32 - half_window;
+                let mut end = current_word as i32 + half_window;
+                let max_word_i32 = max_word as i32;
+
+                if start < -max_word_i32 {
+                    end = (end + (-max_word_i32 - start)).min(max_word_i32);
+                    start = -max_word_i32;
+                }
+                if end > max_word_i32 {
+                    start = (start - (end - max_word_i32)).max(-max_word_i32);
+                    end = max_word_i32;
+                }
+
+                (start as i16, end as i16)
+            } else {
+                (-max_word, max_word)
+            };
+            let scan_word_count = scan_end_word as i32 - scan_start_word as i32 + 1;
+            let verbose_bitmap_scan = std::env::var("V3_POOL_VERBOSE_BITMAP_SCAN")
+                .map(|v| {
+                    let v = v.trim();
+                    v == "1"
+                        || v.eq_ignore_ascii_case("true")
+                        || v.eq_ignore_ascii_case("yes")
+                        || v.eq_ignore_ascii_case("on")
+                })
+                .unwrap_or(false);
+            if verbose_bitmap_scan {
+                println!(
+                    "[V3]   Pool {:?} (fee {}) — scanning {} bitmap words for ticks...",
+                    pool_addr,
+                    fee,
+                    scan_word_count,
+                );
+            }
             let mut ticks: BTreeMap<i32, TickEntry> = BTreeMap::new();
-            for word_pos in -max_word..=max_word {
+            for word_pos in scan_start_word..=scan_end_word {
                 let bitmap = match pool_contract.tick_bitmap(word_pos).call().await {
                     Ok(b) => b,
                     Err(_) => continue,

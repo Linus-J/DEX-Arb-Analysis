@@ -574,9 +574,9 @@ mod tests {
     // 2. Clear price discrepancy → opportunity detected
     #[test]
     fn test_arb_detected() {
-        // pair_a: cheap token (buy here) — high WETH reserve, low token reserve
+        // pair_a: expensive token (sell here) — high WETH reserve, low token reserve
         let pair_a = Reserve::new(parse_ether(1000).unwrap(), parse_ether(500).unwrap());
-        // pair_b: expensive token (sell here) — low WETH reserve, high token reserve
+        // pair_b: cheap token (buy here) — low WETH reserve, high token reserve
         let pair_b = Reserve::new(parse_ether(500).unwrap(), parse_ether(1000).unwrap());
         let result = profit(&pair_a, &pair_b, parse_ether(100).unwrap());
         assert!(result.is_some());
