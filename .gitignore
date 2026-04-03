@@ -1,2 +1,4 @@
 /target
 .env
+snapshot.json
+src/tokens.txt
